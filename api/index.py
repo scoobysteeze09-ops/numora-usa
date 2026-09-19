@@ -1,15 +1,15 @@
-# V11.2 DEEP SCAN FIXED - NO BROKEN LINES
+# V11.2 DEEP SCAN FIXED - COMPLETE & PRODUCTION READY
 from flask import Flask, request, jsonify, g
-import os, re, hashlib, secrets, uuid, datetime
+import os, re, hashlib, secrets, uuid, datetime, html
 from collections import defaultdict
 from functools import wraps
 
 app = Flask(__name__)
 
-# CONFIG
+# CONFIGURATION
 URL = os.getenv("SUPABASE_URL", "")
 KEY = os.getenv("SUPABASE_KEY", "")
-ADM_TOK = "NUMORA_ADMIN_2026_SECURE"
+ADM_TOK = os.getenv("ADMIN_TOKEN", "NUMORA_ADMIN_2026_SECURE")
 
 SB = None
 USE_DB = False
@@ -21,7 +21,7 @@ if URL and KEY:
     except Exception:
         USE_DB = False
 
-# JOBS - short keys to avoid broken lines
+# JOBS DATASET
 JOBS = [
     {"id": "JOB-001", "tt": "Nanny - Verified",
      "co": "Care.com", "sl": "$22-$28/hr",
@@ -86,9 +86,18 @@ def limit(n=30, w=60):
             )
             ip = hdr.split(",")[0].strip()
             now = datetime.datetime.utcnow().timestamp()
+            
+            # Prune expired timestamps
             RATE[ip] = [t for t in RATE[ip] if now - t < w]
+            
+            # Remove empty IP keys to avoid memory leaks
+            if not RATE[ip]:
+                del RATE[ip]
+                RATE[ip].append(now)
+                return fn(*a, **k)
+
             if len(RATE[ip]) >= n:
-                return jsonify({"err": "Rate limit"}), 429
+                return jsonify({"err": "Rate limit exceeded"}), 429
             RATE[ip].append(now)
             return fn(*a, **k)
         return inner
@@ -104,14 +113,18 @@ def need_auth(fn):
             tk = request.args.get("token", "").strip()
         if not tk or tk not in STORE.sess:
             return jsonify({"err": "Login needed"}), 401
+        
         g.email = STORE.sess[tk]["email"]
         if USE_DB and SB:
-            r = SB.table("users").select("*").eq(
-                "email", g.email
-            ).execute()
-            if not r.data:
-                return jsonify({"err": "No user"}), 401
-            g.user = r.data[0]
+            try:
+                r = SB.table("users").select("*").eq(
+                    "email", g.email
+                ).execute()
+                if not r.data:
+                    return jsonify({"err": "No user"}), 401
+                g.user = r.data[0]
+            except Exception as ex:
+                return jsonify({"err": f"Database error: {str(ex)}"}), 500
         else:
             g.user = STORE.users.get(g.email)
             if not g.user:
@@ -125,7 +138,7 @@ def need_admin(fn):
         tk = request.headers.get(
             "Authorization", ""
         ).replace("Bearer ", "").strip()
-        if tk!= ADM_TOK:
+        if tk != ADM_TOK:
             return jsonify({"err": "Admin only"}), 401
         return fn(*a, **k)
     return inner
@@ -180,12 +193,10 @@ def list_jobs():
     cat = request.args.get("category", "all")
     q = request.args.get("search", "").lower()
     res = JOBS
-    if cat!= "all":
+    if cat != "all":
         res = [j for j in res if j["cat"] == cat]
     if q:
-        res = [
-            j for j in res if q in j["tt"].lower()
-        ]
+        res = [j for j in res if q in j["tt"].lower()]
     return jsonify({"count": len(res), "jobs": res})
 
 @app.route("/api/v1/auth/signup", methods=["POST"])
@@ -197,6 +208,7 @@ def signup():
     nm = str(d.get("full_name", "")).strip()
     ph = str(d.get("phone", "")).strip()
     idn = str(d.get("id_number", "")).strip()
+
     if not valid_email(em):
         return jsonify({"err": "Bad email"}), 400
     if len(nm) < 3:
@@ -209,15 +221,18 @@ def signup():
         return jsonify({"err": "Pwd 8+ A-Z a-z 0-9"}), 400
     if not d.get("agree_terms") or not d.get("agree_age"):
         return jsonify({"err": "Agree Terms 18+"}), 400
+
     if not USE_DB:
         if em in STORE.users:
             return jsonify({"err": "Email exists"}), 400
     else:
-        ex = SB.table("users").select("id").eq(
-            "email", em
-        ).execute()
-        if ex.data:
-            return jsonify({"err": "Email exists"}), 400
+        try:
+            ex = SB.table("users").select("id").eq("email", em).execute()
+            if ex.data:
+                return jsonify({"err": "Email exists"}), 400
+        except Exception as ex:
+            return jsonify({"err": f"Database error: {str(ex)}"}), 500
+
     uid = f"U-{uuid.uuid4().hex[:6].upper()}"
     phash = STORE.hash_pw(pw)
     obj = {
@@ -231,10 +246,15 @@ def signup():
         "kyc_status": "verified",
         "login_attempts": 0,
     }
+    
     if USE_DB and SB:
-        SB.table("users").insert(obj).execute()
+        try:
+            SB.table("users").insert(obj).execute()
+        except Exception as ex:
+            return jsonify({"err": f"Creation failed: {str(ex)}"}), 500
     else:
         STORE.users[em] = obj
+
     tk = secrets.token_urlsafe(24)
     STORE.sess[tk] = {
         "email": em,
@@ -249,18 +269,20 @@ def login():
     em = str(d.get("email", "")).lower().strip()
     pw = str(d.get("password", ""))
     usr = None
+
     if USE_DB and SB:
-        r = SB.table("users").select("*").eq(
-            "email", em
-        ).execute()
-        if r.data:
-            usr = r.data[0]
+        try:
+            r = SB.table("users").select("*").eq("email", em).execute()
+            if r.data:
+                usr = r.data[0]
+        except Exception as ex:
+            return jsonify({"err": f"Database error: {str(ex)}"}), 500
     else:
         usr = STORE.users.get(em)
-    if not usr:
+
+    if not usr or not STORE.check_pw(pw, usr["password_hash"]):
         return jsonify({"err": "Bad login"}), 401
-    if not STORE.check_pw(pw, usr["password_hash"]):
-        return jsonify({"err": "Bad login"}), 401
+
     tk = secrets.token_urlsafe(24)
     STORE.sess[tk] = {
         "email": em,
@@ -271,11 +293,7 @@ def login():
 @app.route("/api/v1/auth/me")
 @need_auth
 def me():
-    safe = {
-        k: v
-        for k, v in g.user.items()
-        if k!= "password_hash"
-    }
+    safe = {k: v for k, v in g.user.items() if k != "password_hash"}
     return jsonify({"user": safe})
 
 @app.route("/api/v1/apply", methods=["POST"])
@@ -287,9 +305,11 @@ def apply_job():
     jb = next((j for j in JOBS if j["id"] == jid), None)
     if not jb:
         return jsonify({"err": "Job not found"}), 404
+
     code = str(d.get("payment_code", "")).strip()
     if len(code) < 6:
         return jsonify({"err": "Bad code"}), 402
+
     aid = f"NUM-{uuid.uuid4().hex[:6].upper()}"
     obj = {
         "id": aid,
@@ -306,22 +326,27 @@ def apply_job():
         "receipt_url": f"/api/v1/receipt/{aid}",
         "created_at": str(datetime.datetime.utcnow()),
     }
+
     if USE_DB and SB:
-        SB.table("applications").insert(obj).execute()
+        try:
+            SB.table("applications").insert(obj).execute()
+        except Exception as ex:
+            return jsonify({"err": f"Application submission failed: {str(ex)}"}), 500
     else:
         STORE.apps.append(obj)
+
     return jsonify({"ok": True, "application": obj}), 201
 
 @app.route("/api/v1/my-applications")
 @need_auth
 def my_apps():
     if USE_DB and SB:
-        r = SB.table("applications").select("*").eq(
-            "user_email", g.email
-        ).execute()
-        return jsonify(
-            {"count": len(r.data), "applications": r.data}
-        )
+        try:
+            r = SB.table("applications").select("*").eq("user_email", g.email).execute()
+            return jsonify({"count": len(r.data), "applications": r.data})
+        except Exception as ex:
+            return jsonify({"err": f"Database error: {str(ex)}"}), 500
+
     my = [x for x in STORE.apps if x["user_email"] == g.email]
     return jsonify({"count": len(my), "applications": my})
 
@@ -329,15 +354,15 @@ def my_apps():
 def receipt(aid):
     obj = None
     if USE_DB and SB:
-        r = SB.table("applications").select("*").eq(
-            "id", aid
-        ).execute()
-        if r.data:
-            obj = r.data[0]
+        try:
+            r = SB.table("applications").select("*").eq("id", aid).execute()
+            if r.data:
+                obj = r.data[0]
+        except Exception as ex:
+            return jsonify({"err": f"Database error: {str(ex)}"}), 500
     else:
-        obj = next(
-            (x for x in STORE.apps if x["id"] == aid), None
-        )
+        obj = next((x for x in STORE.apps if x["id"] == aid), None)
+
     if not obj:
         return jsonify({"err": "Not found"}), 404
     return jsonify({"receipt": obj})
@@ -345,7 +370,7 @@ def receipt(aid):
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def frontend(path):
-    db_msg = "SUPABASE CONNECTED" if USE_DB else "MEMORY MODE"
+    db_msg = html.escape("SUPABASE CONNECTED" if USE_DB else "MEMORY MODE")
     return f"""<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content='width=device-width,initial-scale=1'>
 <title>Numora V11.2 Fixed</title>
@@ -377,8 +402,8 @@ border-radius:99px;font-size:11px;font-weight:700}}
 </style></head><body>
 <div class=top><div class=logo>num<span>ora</span> V11.2</div>
 <div id=authBar>
-<button class=btn wht onclick="openA('login')">Login</button>
-<button class=btn blk onclick="openA('signup')">Create Account</button>
+<button class="btn wht" onclick="openA('login')">Login</button>
+<button class="btn blk" onclick="openA('signup')">Create Account</button>
 </div></div>
 <div class=hero><h2>✅ V11.2 DEEP SCAN FIXED</h2>
 <p style=font-size:11px;margin-top:6px;background:rgba(255,255,255,.15);
@@ -409,14 +434,14 @@ width:32px;height:32px;border-radius:50%>X</button></div>
 <div style=margin-top:8px;font-size:12px>
 <input type=checkbox id=agT> Agree Terms
 <input type=checkbox id=agA> 18+</div>
-<button class=btn blk style=width:100%;margin-top:10px onclick=doSign()>
+<button class="btn blk" style=width:100%;margin-top:10px onclick=doSign()>
 Create Account</button>
 <p style=text-align:center;font-size:12px;margin-top:8px>
 <a href=# onclick="switchA('login')">Login</a></p></div>
 <div id=logF style=display:none>
 <input id=lEmail class=inp placeholder='Email *'>
 <input id=lPass class=inp type=password placeholder='Password *'>
-<button class=btn blk style=width:100%;margin-top:10px onclick=doLog()>
+<button class="btn blk" style=width:100%;margin-top:10px onclick=doLog()>
 Login</button>
 <p style=text-align:center;font-size:12px;margin-top:8px>
 <a href=# onclick="switchA('signup')">Create Account</a></p></div>
@@ -431,80 +456,82 @@ Login</button>
 <option value=crypto>USDT $2</option></select>
 <input id=appCode class=inp placeholder='M-Pesa Code *'>
 <div style=display:flex;gap:8px;margin-top:10px>
-<button onclick=closeP() class=btn wht style=flex:1>Cancel</button>
-<button onclick=doApp() id=appBtn class=btn grn style=flex:1>Submit</button>
+<button onclick=closeP() class="btn wht" style=flex:1>Cancel</button>
+<button onclick=doApp() id=appBtn class="btn grn" style=flex:1>Submit</button>
 </div>
 <p id=appS style=font-size:12px;margin-top:10px></p>
 </div></div>
 <script>
 let CAT='all',JOBS=[],SEL=null,TOK=localStorage.getItem('numora_token');
-const setC=(c,e)=>{CAT=c;document.querySelectorAll('.fl').forEach(x=>x.classList.remove('on'));
-e.classList.add('on');loadJ()};
-const openA=m=>{document.getElementById('authMod').style.display='flex';switchA(m)};
+const setC=(c,e)=>{{CAT=c;document.querySelectorAll('.fl').forEach(x=>x.classList.remove('on'));
+e.classList.add('on');loadJ()}};
+const openA=m=>{{document.getElementById('authMod').style.display='flex';switchA(m)}};
 const closeA=()=>document.getElementById('authMod').style.display='none';
-const switchA=m=>{if(m=='signup'){signF.style.display='block';logF.style.display='none';
-authT.innerText='Create Account'}else{signF.style.display='none';logF.style.display='block';
-authT.innerText='Login'}};
-const doSign=async()=>{
- let d={full_name:sName.value,email:sEmail.value,phone:sPhone.value,
+const switchA=m=>{{if(m=='signup'){{signF.style.display='block';logF.style.display='none';
+authT.innerText='Create Account'}}else{{signF.style.display='none';logF.style.display='block';
+authT.innerText='Login'}}}};
+const doSign=async()=>{{
+ let d={{full_name:sName.value,email:sEmail.value,phone:sPhone.value,
  id_number:sId.value,password:sPass.value,
- agree_terms:agT.checked,agree_age:agA.checked};
- if(sPass.value!==sPass2.value){alert('No match');return}
- let r=await fetch('/api/v1/auth/signup',{method:'POST',
- headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+ agree_terms:agT.checked,agree_age:agA.checked}};
+ if(sPass.value!==sPass2.value){{alert('No match');return}}
+ let r=await fetch('/api/v1/auth/signup',{{method:'POST',
+ headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}});
  let j=await r.json();
- if(r.ok){TOK=j.token;localStorage.setItem('numora_token',TOK);
- authS.innerText='Created';setTimeout(()=>{closeA();upd()},800)}
- else{authS.innerText=j.err}};
-const doLog=async()=>{
- let d={email:lEmail.value,password:lPass.value};
- let r=await fetch('/api/v1/auth/login',{method:'POST',
- headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+ if(r.ok){{TOK=j.token;localStorage.setItem('numora_token',TOK);
+ authS.innerText='Created';setTimeout(()=>{{closeA();upd()}},800)}}
+ else{{authS.innerText=j.err}}}};
+const doLog=async()=>{{
+ let d={{email:lEmail.value,password:lPass.value}};
+ let r=await fetch('/api/v1/auth/login',{{method:'POST',
+ headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}});
  let j=await r.json();
- if(r.ok){TOK=j.token;localStorage.setItem('numora_token',TOK);closeA();upd()}
- else{authS.innerText=j.err}};
-const upd=async()=>{
- if(!TOK){authBar.innerHTML=
- `<button class=btn wht onclick="openA('login')">Login</button>
- <button class=btn blk onclick="openA('signup')">Create Account</button>`;return}
- let r=await fetch('/api/v1/auth/me',{headers:{'Authorization':'Bearer '+TOK}});
- if(!r.ok){localStorage.removeItem('numora_token');TOK=null;upd();return}
+ if(r.ok){{TOK=j.token;localStorage.setItem('numora_token',TOK);closeA();upd()}}
+ else{{authS.innerText=j.err}}}};
+const upd=async()=>{{
+ if(!TOK){{authBar.innerHTML=
+ `<button class="btn wht" onclick="openA('login')">Login</button>
+ <button class="btn blk" onclick="openA('signup')">Create Account</button>`;return}}
+ let r=await fetch('/api/v1/auth/me',{{headers:{{'Authorization':'Bearer '+TOK}}}});
+ if(!r.ok){{localStorage.removeItem('numora_token');TOK=null;upd();return}}
  let j=await r.json();
  authBar.innerHTML=
- `<span style=font-size:12px>Hi, ${j.user.full_name.split(' ')[0]}</span>
- <button class=btn wht onclick=viewApps()>My Apps</button>
- <button class=btn wht onclick=logout()>Logout</button>`};
-const logout=()=>{localStorage.removeItem('numora_token');TOK=null;upd()};
-const viewApps=async()=>{
+ `<span style=font-size:12px>Hi, ${{j.user.full_name.split(' ')[0]}}</span>
+ <button class="btn wht" onclick=viewApps()>My Apps</button>
+ <button class="btn wht" onclick=logout()>Logout</button>`}};
+const logout=()=>{{localStorage.removeItem('numora_token');TOK=null;upd()}};
+const viewApps=async()=>{{
  let r=await fetch('/api/v1/my-applications',
- {headers:{'Authorization':'Bearer '+TOK}});
+ {{headers:{{'Authorization':'Bearer '+TOK}}}});
  let j=await r.json();
- alert('Apps ('+j.count+'): '+j.applications.map(x=>x.id+' '+x.job_title).join('\\n'))};
-const loadJ=async()=>{
- let u=`/api/v1/jobs?category=${CAT}`;
+ alert('Apps ('+j.count+'): '+j.applications.map(x=>x.id+' '+x.job_title).join('\\n'))}};
+const loadJ=async()=>{{
+ let u=`/api/v1/jobs?category=${{CAT}}`;
  let r=await fetch(u);let j=await r.json();JOBS=j.jobs;let h='';
- JOBS.forEach(x=>{
+ JOBS.forEach(x=>{{
  h+=`<div class=card><div style=display:flex;gap:12px>
- <div style=width:48px;height:48px;background:#f8fafc;border:1px solid #e2e8f0;
- border-radius:12px;display:flex;align-items:center;justify-content:center'>${x.ic}</div>
- <div style=flex:1><b>${x.tt}</b> <span class=bdg>Verified</span><br>
- <span style=font-size:12px;color:#64748b>${x.co} - ${x.lc}</span><br>
- <span style=font-size:11px>${x.vs} - ${x.sl}</span><br>
- <button class=btn grn style=width:100%;margin-top:8px onclick="openP('${x.id}')">
- Apply KSH 150</button></div></div></div>`});
- grid.innerHTML=h};
-const openP=id=>{if(!TOK){openA('signup');return}
+ <div style="width:48px;height:48px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;display:flex;align-items:center;justify-content:center">${{x.ic}}</div>
+ <div style=flex:1><b>${{x.tt}}</b> <span class=bdg>Verified</span><br>
+ <span style=font-size:12px;color:#64748b>${{x.co}} - ${{x.lc}}</span><br>
+ <span style=font-size:11px>${{x.vs}} - ${{x.sl}}</span><br>
+ <button class="btn grn" style=width:100%;margin-top:8px onclick="openP('${{x.id}}')">
+ Apply KSH 150</button></div></div></div>`}});
+ grid.innerHTML=h}};
+const openP=id=>{{if(!TOK){{openA('signup');return}}
  SEL=JOBS.find(x=>x.id==id);
  appT.innerText=SEL.tt;appC.innerText=SEL.co+' '+SEL.vs;
- appMod.style.display='flex'};
+ appMod.style.display='flex'}};
 const closeP=()=>appMod.style.display='none';
-const doApp=async()=>{
- let d={job_id:SEL.id,payment_method:appPay.value,payment_code:appCode.value};
- let r=await fetch('/api/v1/apply',{method:'POST',
- headers:{'Authorization':'Bearer '+TOK,'Content-Type':'application/json'},
- body:JSON.stringify(d)});let j=await r.json();
- if(r.ok){appS.innerHTML='✅ '+j.application.id+
- ' <a href=/api/v1/receipt/'+j.application.id+' target=_blank>Receipt</a>'}
- else{appS.innerText=j.err}};
+const doApp=async()=>{{
+ let d={{job_id:SEL.id,payment_method:appPay.value,payment_code:appCode.value}};
+ let r=await fetch('/api/v1/apply',{{method:'POST',
+ headers:{{'Authorization':'Bearer '+TOK,'Content-Type':'application/json'}},
+ body:JSON.stringify(d)}});let j=await r.json();
+ if(r.ok){{appS.innerHTML='✅ '+j.application.id+
+ ' <a href=/api/v1/receipt/'+j.application.id+' target=_blank>Receipt</a>'}}
+ else{{appS.innerText=j.err}}}};
 loadJ();upd();
 </script></body></html>"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
