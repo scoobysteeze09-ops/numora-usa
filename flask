@@ -1,0 +1,95 @@
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# --- JOBS ---
+JOBS = [
+  {"id":"J001","t":"Live-in Nanny - Verified","c":"Care.com","s":"$22-28/hr","l":"Houston, TX","v":"H2B Visa","k":"caregiving","ic":"👶"},
+  {"id":"J002","t":"Hotel Attendant - Marriott","c":"Marriott","s":"$19-24/hr","l":"New York, NY","v":"H2B Visa","k":"hospitality","ic":"🏨"},
+  {"id":"J003","t":"Registered Nurse - EB3","c":"HCA Healthcare","s":"$38-45/hr","l":"Dallas, TX","v":"EB-3 Green Card","k":"medical","ic":"👩‍⚕️"},
+  {"id":"J004","t":"Housekeeper - Beverly Hills","c":"BA Staffing","s":"$20-26/hr","l":"Beverly Hills, CA","v":"J1 Visa","k":"domestic","ic":"🧹"},
+  {"id":"J005","t":"Warehouse - Amazon","c":"Amazon","s":"$20.50/hr","l":"Seattle, WA","v":"H2B Seasonal","k":"logistics","ic":"📦"},
+]
+
+@app.route("/api/v1/health")
+def health():
+    return jsonify({"status":"ok","version":"11.5-loading-fixed","jobs":len(JOBS)})
+
+@app.route("/api/v1/jobs")
+def jobs():
+    cat = request.args.get("category","all")
+    q = request.args.get("search","").lower()
+    res = JOBS
+    if cat!="all":
+        res = [j for j in res if j["k"]==cat]
+    if q:
+        res = [j for j in res if q in j["t"].lower()]
+    return jsonify({"count":len(res),"jobs":res})
+
+@app.route("/", defaults={"path": ""})
+@app.route("/<path:path>")
+def front(path):
+    return """<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'>
+<title>Numora V11.5</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:system-ui}
+body{background:#f8fafc}.top{background:#fff;padding:12px;
+border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;position:sticky;top:0;z-index:9}
+.logo{font-weight:900;font-size:20px}.logo span{color:#16a34a}
+.btn{border:0;padding:10px 16px;border-radius:12px;font-weight:800;cursor:pointer}
+.bk{background:#0f172a;color:#fff}.w{background:#fff;border:1px solid #e2e8f0}
+.hero{margin:12px;background:linear-gradient(135deg,#0f172a,#16a34a);color:#fff;padding:18px;border-radius:18px}
+.card{background:#fff;border:1px solid #e2e8f0;margin:12px;border-radius:16px;padding:14px}
+.flt{display:flex;gap:8px;overflow:auto;padding:0 12px 8px}
+.f{background:#fff;border:1px solid #e2e8f0;padding:7px 14px;border-radius:99px;font-size:13px;cursor:pointer}
+.f.on{background:#0f172a;color:#fff}
+</style></head><body>
+<div class=top><div class=logo>num<span>ora</span> V11.5</div>
+<div><button class=btn w onclick="alert('Login coming V11.6')">Login</button>
+<button class=btn bk>Create Account</button></div></div>
+<div class=hero><h2>✅ V11.5 LOADING FIXED</h2>
+<p style=font-size:11px;margin-top:6px;background:rgba(255,255,255,.15);padding:8px;border-radius:8px>
+Build Fixed - Jobs should show below. If still Loading, clear cache.</p></div>
+<div class=flt>
+<div class='f on' onclick="filter('all',this)">All</div>
+<div class=f onclick="filter('caregiving',this)">Nanny</div>
+<div class=f onclick="filter('hospitality',this)">Hotel</div>
+<div class=f onclick="filter('medical',this)">Nurse</div>
+<div class=f onclick="filter('logistics',this)">Warehouse</div>
+</div>
+<div id=grid>Loading jobs from /api/v1/jobs ...</div>
+<script>
+let CAT='all';
+function filter(c,el){
+ CAT=c;
+ document.querySelectorAll('.f').forEach(x=>x.classList.remove('on'));
+ el.classList.add('on');
+ loadJobs();
+}
+async function loadJobs(){
+ try{
+  let url='/api/v1/jobs?category='+CAT;
+  let r=await fetch(url);
+  let data=await r.json();
+  let jobs=data.jobs||[];
+  if(jobs.length==0){
+   document.getElementById('grid').innerHTML='<div class=card>No jobs found for '+CAT+'</div>';
+   return;
+  }
+  let html='';
+  jobs.forEach(j=>{
+   html+='<div class=card><div style=display:flex;gap:12px>'+
+   '<div style=width:48px;height:48px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:24px>'+j.ic+'</div>'+
+   '<div style=flex:1><b>'+j.t+'</b> <span style=background:#dcfce7;color:#166534;padding:2px 6px;border-radius:99px;font-size:10px>Verified</span><br>'+
+   '<span style=font-size:12px;color:#64748b'>'+j.c+' - '+j.l+'</span><br>'+
+   '<span style=font-size:11px'>'+j.v+' - '+j.s+'</span><br>'+
+   '<button class=btn bk style=width:100%;margin-top:8px;background:#16a34a'>Apply KSH 150</button></div></div></div>';
+  });
+  document.getElementById('grid').innerHTML=html;
+ }catch(e){
+  document.getElementById('grid').innerHTML='<div class=card style=color:red>Error loading: '+e+'<br>Check /api/v1/jobs</div>';
+ }
+}
+loadJobs();
+</script></body></html>"""
